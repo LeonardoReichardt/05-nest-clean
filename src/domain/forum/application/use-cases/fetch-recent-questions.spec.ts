@@ -1,53 +1,31 @@
-import { InMemoryQuestionsRepository } from 'test/repositories/in-memory-questions-repository'
-import { makeQuestion } from 'test/factories/make-question'
-import { FetchRecentQuestionsUseCase } from './fetch-recent-questions'
-import { InMemoryQuestionAttachmentsRepository } from 'test/repositories/in-memory-question-attachments-repository'
+import { Controller, Get, Query, UseGuards } from '@nestjs/common'
+import { JwtAuthGuard } from '@/infra/auth/jwt-auth.guard'
+import { ZodValidationPipe } from '@/infra/http/pipes/zod-validation-pipe'
+import { z } from 'zod'
+import { FetchRecentQuestionsUseCase } from '@/domain/forum/application/use-cases/fetch-recent-questions'
 
-let inMemoryQuestionAttachmentsRepository: InMemoryQuestionAttachmentsRepository
-let inMemoryQuestionsRepository: InMemoryQuestionsRepository
-let sut: FetchRecentQuestionsUseCase
+const pageQueryParamSchema = z
+  .string()
+  .optional()
+  .default('1')
+  .transform(Number)
+  .pipe(z.number().min(1))
 
-describe('Fetch Recent Questions', () => {
-  beforeEach(() => {
-    inMemoryQuestionAttachmentsRepository =
-      new InMemoryQuestionAttachmentsRepository()
-    inMemoryQuestionsRepository = new InMemoryQuestionsRepository(
-      inMemoryQuestionAttachmentsRepository,
-    )
-    sut = new FetchRecentQuestionsUseCase(inMemoryQuestionsRepository)
-  })
+const queryValidationPipe = new ZodValidationPipe(pageQueryParamSchema)
 
-  it('should be able to fetch recent questions', async () => {
-    await inMemoryQuestionsRepository.create(
-      makeQuestion({ createdAt: new Date(2022, 0, 20) }),
-    )
-    await inMemoryQuestionsRepository.create(
-      makeQuestion({ createdAt: new Date(2022, 0, 18) }),
-    )
-    await inMemoryQuestionsRepository.create(
-      makeQuestion({ createdAt: new Date(2022, 0, 23) }),
-    )
+type PageQueryParamSchema = z.infer<typeof pageQueryParamSchema>
 
-    const result = await sut.execute({
-      page: 1,
+@Controller('/questions')
+@UseGuards(JwtAuthGuard)
+export class FetchRecentQuestionsController {
+  constructor(private fetchRecentQuestions: FetchRecentQuestionsUseCase) {}
+
+  @Get()
+  async handle(@Query('page', queryValidationPipe) page: PageQueryParamSchema) {
+    const questions = await this.fetchRecentQuestions.execute({
+      page,
     })
 
-    expect(result.value?.questions).toEqual([
-      expect.objectContaining({ createdAt: new Date(2022, 0, 23) }),
-      expect.objectContaining({ createdAt: new Date(2022, 0, 20) }),
-      expect.objectContaining({ createdAt: new Date(2022, 0, 18) }),
-    ])
-  })
-
-  it('should be able to fetch paginated recent questions', async () => {
-    for (let i = 1; i <= 22; i++) {
-      await inMemoryQuestionsRepository.create(makeQuestion())
-    }
-
-    const result = await sut.execute({
-      page: 2,
-    })
-
-    expect(result.value?.questions).toHaveLength(2)
-  })
-})
+    return { questions }
+  }
+}
