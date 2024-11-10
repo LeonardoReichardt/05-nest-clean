@@ -1,51 +1,138 @@
-import { config } from 'dotenv'
+import { QuestionsRepository } from '@/domain/forum/application/repositories/questions-repository'
+import { AppModule } from '@/infra/app.module'
+import { CacheRepository } from '@/infra/cache/cache-repository'
+import { CacheModule } from '@/infra/cache/cache.module'
+import { DatabaseModule } from '@/infra/database/database.module'
+import { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { AttachmentFactory } from 'test/factories/make-attachment'
+import { QuestionFactory } from 'test/factories/make-question'
+import { QuestionAttachmentFactory } from 'test/factories/make-question-attachments'
+import { StudentFactory } from 'test/factories/make-student'
 
-import { PrismaClient } from '@prisma/client'
-import { randomUUID } from 'node:crypto'
-import { execSync } from 'node:child_process'
-import { DomainEvents } from '@/core/events/domain-events'
-import { Redis } from 'ioredis'
-import { envSchema } from '@/infra/env/env'
+describe('Prisma Questions Repository (E2E)', () => {
+  let app: INestApplication
+  let studentFactory: StudentFactory
+  let questionFactory: QuestionFactory
+  let attachmentFactory: AttachmentFactory
+  let questionAttachmentFactory: QuestionAttachmentFactory
+  let cacheRepository: CacheRepository
+  let questionsRepository: QuestionsRepository
 
-config({ path: '.env', override: true })
-config({ path: '.env.test', override: true })
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule, DatabaseModule, CacheModule],
+      providers: [
+        StudentFactory,
+        QuestionFactory,
+        AttachmentFactory,
+        QuestionAttachmentFactory,
+      ],
+    }).compile()
 
-const env = envSchema.parse(process.env)
+    app = moduleRef.createNestApplication()
 
-const prisma = new PrismaClient()
-const redis = new Redis({
-  host: env.REDIS_HOST,
-  port: env.REDIS_PORT,
-  db: env.REDIS_DB,
-})
+    studentFactory = moduleRef.get(StudentFactory)
+    questionFactory = moduleRef.get(QuestionFactory)
+    attachmentFactory = moduleRef.get(AttachmentFactory)
+    questionAttachmentFactory = moduleRef.get(QuestionAttachmentFactory)
+    cacheRepository = moduleRef.get(CacheRepository)
+    questionsRepository = moduleRef.get(QuestionsRepository)
 
-function generateUniqueDatabaseURL(schemaId: string) {
-  if (!env.DATABASE_URL) {
-    throw new Error('Please provider a DATABASE_URL environment variable')
-  }
+    await app.init()
+  })
 
-  const url = new URL(env.DATABASE_URL)
+  it('should cache question details', async () => {
+    const user = await studentFactory.makePrismaStudent()
 
-  url.searchParams.set('schema', schemaId)
+    const question = await questionFactory.makePrismaQuestion({
+      authorId: user.id,
+    })
 
-  return url.toString()
-}
+    const attachment = await attachmentFactory.makePrismaAttachment()
 
-const schemaId = randomUUID()
+    await questionAttachmentFactory.makePrismaQuestionAttachment({
+      attachmentId: attachment.id,
+      questionId: question.id,
+    })
 
-beforeAll(async () => {
-  const databaseURL = generateUniqueDatabaseURL(schemaId)
+    const slug = question.slug.value
 
-  process.env.DATABASE_URL = databaseURL
+    const questionDetails = await questionsRepository.findDetailsBySlug(slug)
 
-  DomainEvents.shouldRun = false
+    const cached = await cacheRepository.get(`question:${slug}:details`)
 
-  await redis.flushdb()
+    if(!cached) {
+      throw new Error()
+    }
 
-  execSync('pnpm prisma migrate deploy')
-})
+    expect(JSON.parse(cached)).toEqual(expect.objectContaining({
+      id: questionDetails?.questionId.toString()
+    }))
+  })
 
-afterAll(async () => {
-  await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaId}" CASCADE`)
-  await prisma.$disconnect()
+  it('should return cached question details on subsequent calls', async () => {
+    const user = await studentFactory.makePrismaStudent()
+
+    const question = await questionFactory.makePrismaQuestion({
+      authorId: user.id,
+    })
+
+    const attachment = await attachmentFactory.makePrismaAttachment()
+
+    await questionAttachmentFactory.makePrismaQuestionAttachment({
+      attachmentId: attachment.id,
+      questionId: question.id,
+    })
+
+    const slug = question.slug.value
+
+    let cached = await cacheRepository.get(`question:${slug}:details`)
+
+    expect(cached).toBeNull()
+
+    await questionsRepository.findDetailsBySlug(slug)
+
+    cached = await cacheRepository.get(`question:${slug}:details`)
+
+    expect(cached).not.toBeNull()
+    
+    if(!cached) {
+      throw new Error()
+    }
+    
+    const questionDetails = await questionsRepository.findDetailsBySlug(slug)
+
+    expect(JSON.parse(cached)).toEqual(expect.objectContaining({
+      id: questionDetails?.questionId.toString()
+    }))
+  })
+
+  it('should reset question details cache when saving the question', async () => {
+    const user = await studentFactory.makePrismaStudent()
+
+    const question = await questionFactory.makePrismaQuestion({
+      authorId: user.id,
+    })
+
+    const attachment = await attachmentFactory.makePrismaAttachment()
+
+    await questionAttachmentFactory.makePrismaQuestionAttachment({
+      attachmentId: attachment.id,
+      questionId: question.id,
+    })
+
+    const slug = question.slug.value
+
+    await cacheRepository.set(
+      `question:${slug}:details`,
+      JSON.stringify({ empty: true }),
+    )
+
+    await questionsRepository.save(question)
+
+    const cached = await cacheRepository.get(`question:${slug}:details`)
+
+    expect(cached).toBeNull()
+  })
 })
