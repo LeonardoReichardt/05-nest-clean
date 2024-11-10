@@ -1,4 +1,3 @@
-
 import { config } from 'dotenv'
 
 import { PrismaClient } from '@prisma/client'
